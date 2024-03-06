@@ -1,4 +1,3 @@
-import concurrent.futures
 import dns.message
 import dns.query
 import dns.resolver
@@ -6,74 +5,65 @@ import dns.zone
 from dns.exception import DNSException
 from dns.rdatatype import *
 import socket
-import pickle
 from sg_ip import dns_to_ip
 import tldextract
 import pandas as pd
+from datetime import datetime
+import concurrent.futures
 
-# ... (your existing imports)
-# importing blacklist data domains
-bl_df= pd.read_csv("blacklist.csv",usecols=['domain'])
-wl_df= pd.read_csv("whitelist.csv",usecols=['domain'])
+# Importing blacklist data domains
+bl_df = pd.read_csv("blacklist.csv", usecols=['domain'])
+wl_df = pd.read_csv("whitelist.csv", usecols=['domain'])
 
-
+# Extract domain from URL
 def extract_domain(url):
-    # Use tldextract to extract the domain
     ext = tldextract.extract(url)
-    domain = f"{ext.domain}.{ext.suffix}"
-    return domain
+    return f"{ext.domain}.{ext.suffix}"
 
-bl_domains = bl_df['domain'].apply(extract_domain)
-wl_domains = wl_df['domain'].apply(extract_domain)
+# Whitelisted and blacklisted domains
+bl_domains = set(bl_df['domain'].apply(extract_domain))
+wl_domains = set(wl_df['domain'].apply(extract_domain))
 
+# ML model server address
+ml_server_address = ('0.0.0.0', 5050)
 
-def get_ip_address(query_name):
-    print(query_name)
+def get_ip_address(domain):
     try:
-        response = dns_to_ip(query_name)
-        return response
-    except DNSException as e:
-        print(f"DNS resolution failed: {e}")
+        ip_address = socket.gethostbyname(domain)
+        return ip_address
+    except socket.gaierror as e:
+        print(f"DNS resolution failed for {domain}: {e}")
         return None
-
-# ... (your existing code)
 
 def handle_dns_request(request, client_address):
     query_name = str(request.question[0].name)
     query_type = request.question[0].rdtype
     received_domain = extract_domain(query_name)
-    received_domain =  received_domain[:-1] 
-    received_domain = extract_domain(query_name)    
 
-    if received_domain in wl_domains.values:
+    if received_domain in wl_domains:
         print(f"The domain {received_domain} is whitelisted. Proceed with DNS resolution.")
         response = dns.message.make_response(request)
         response.question = request.question
 
         if query_type == A:
-            
             ip_address = get_ip_address(received_domain)
             if ip_address:
                 try:
                     RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, ip_address)
+                    response.answer.append(RRset)
                 except:
-                    RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, "0.0.0.0")
-                response.answer.append(RRset)
+                    print(f"Error creating response for {received_domain}")
 
-    elif received_domain in bl_domains.values:
-        print(f"The domain {received_domain} is present in the blacklist file.")
-        print(f"Blocked {received_domain}")
-        # Implement your response for blacklisted domains (e.g., return an error response)
+    elif received_domain in bl_domains:
+        print(f"The domain {received_domain} is present in the blacklist file. Blocked.")
+        response = dns.message.make_response(request)
+        response.question = request.question
         try:
-            response = dns.message.make_response(request)
-            response.question = request.question
             RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, "0.0.0.0")
             response.answer.append(RRset)
         except:
-            print("Not Resolved, dummy ip sent!")
+            print("Error creating response for blacklisted domain")
     else:
-        # Implement your DNS processing logic here
-        # For demonstration, just print a success message
         print(f"The domain {received_domain} is not blacklisted. Proceed with DNS resolution.")
 
         # Implement code for ML model
@@ -81,8 +71,8 @@ def handle_dns_request(request, client_address):
         # Create a socket object
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        # Connect to the server's address and port
-        server_address = ('192.168.29.126', 5050)
+        # Connect to the ML server's address and port
+        server_address = ('0.0.0.0', 5050)
         client_socket.connect(server_address)
         print('Connected to {}:{}'.format(*server_address))
 
@@ -117,47 +107,47 @@ def handle_dns_request(request, client_address):
                 response.answer.append(RRset)
             except:
                 print("Not Resolved, dummy ip sent!")
-
-
+        
         else:
-            response = dns.message.make_response(request)
-            response.question = request.question
+            # Process DNS query asynchronously
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(resolve_dns_query, received_domain)
+                ip_address = future.result()
 
-            if query_type == A:
-                
-                ip_address = get_ip_address(received_domain)
-                if ip_address:
-                    try:
-                        RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, ip_address)
-                    except:
-                        RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, "0.0.0.0")
+            if ip_address:
+                response = dns.message.make_response(request)
+                response.question = request.question
+                try:
+                    RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, ip_address)
                     response.answer.append(RRset)
+                except:
+                    print(f"Error creating response for {received_domain}")
 
-    # Set the query ID of the response message
     response.id = request.id
-
+    print(f"Request for {query_name} sent back to {client_address} at {datetime.now()}")
     server_socket.sendto(response.to_wire(), client_address)
 
+def resolve_dns_query(domain):
+    try:
+        ip_address = socket.gethostbyname(domain)
+        return ip_address
+    except socket.gaierror as e:
+        print(f"DNS resolution failed for {domain}: {e}")
+    return None
 
 def start_dns_server():
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        while True:
-            try:
-                data, client_address = server_socket.recvfrom(1024)
-                request = dns.message.from_wire(data)
-
-                # Schedule the handle_dns_request function to run in the ThreadPoolExecutor
-                future = executor.submit(handle_dns_request, request, client_address)
-
-                # Use future.result() to wait for the function to complete (optional)
-                # result = future.result()
-            except KeyboardInterrupt:
-                break
+    while True:
+        try:
+            data, client_address = server_socket.recvfrom(1024)
+            request = dns.message.from_wire(data)
+            handle_dns_request(request, client_address)
+        except KeyboardInterrupt:
+            break
 
 if __name__ == "__main__":
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_address = ('0.0.0.0', 53)
     server_socket.bind(server_address)
-
-    print("Server listening at {}:{}...".format(*server_address))
+    
+    print(f"Server listening at {server_address}...")
     start_dns_server()
