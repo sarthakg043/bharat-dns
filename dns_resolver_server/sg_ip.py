@@ -1,5 +1,4 @@
 import argparse
-
 import dns.message
 import dns.name
 import dns.query
@@ -7,10 +6,13 @@ import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
 
+
 FORMATS = (("CNAME", "{alias} is an alias for {name}"),
            ("A", "{name} has address {address}"),
            ("AAAA", "{name} has IPv6 address {address}"),
-           ("MX", "{name} mail is handled by {preference} {exchange}"))
+           ("MX", "{name} mail is handled by {preference} {exchange}"),
+           ("SOA", "{name} is the Start of Authority for {mname}, responsible mailbox is {rname}, serial number is {serial}, refresh interval is {refresh}, retry interval is {retry}, expire limit is {expire}, minimum TTL is {minimum}"),
+           ("NS", "{name} name server is {target}"))
 
 # current as of 19 March 2018
 ROOT_SERVERS = ("198.41.0.4",
@@ -59,6 +61,22 @@ def collect_results(name: str) -> dict:
                             "name": a_name,
                             "preference": answer.preference,
                             "exchange": str(answer.exchange)
+                        })
+                    elif rtype == "SOA":
+                        records.append({
+                            "name": a_name,
+                            "mname": str(answer.mname),
+                            "rname": str(answer.rname),
+                            "serial": answer.serial,
+                            "refresh": answer.refresh,
+                            "retry": answer.retry,
+                            "expire": answer.expire,
+                            "minimum": answer.minimum
+                        })
+                    elif rtype == "NS":
+                        records.append({
+                            "name": a_name,
+                            "target": str(answer.target)
                         })
                     else:
                         records.append({
@@ -173,22 +191,69 @@ def main():
         if (result != -1):
             print_results(result)
             
-# resolve.py
+class RecordNotFound(Exception):
+    pass
 
-# ... (previous code)
+def dns_to_ip_extractor(res, r_type: str = "A"):
+    records = res.get(r_type, [])
+    # If records are found for the specified type
+    if records:
+        # For A and AAAA records, return the first IP address found
+        if r_type in ["A", "AAAA"]:
+            return records[0]["address"]
+        # For SOA records, return the formatted SOA record information
+        elif r_type == "SOA":
+            return records[0]
+        # For MX records, return the formatted MX record information
+        elif r_type == "MX":
+            return records[0]
+        # For CNAME records, return the formatted CNAME record information
+        elif r_type == "CNAME":
+            return records[0]
+        # For other record types like NS, etc., return the relevant information
+        else:
+            record = records[0]
+            return " ".join([f"{key}: {value}" for key, value in record])
+    else:
+        raise RecordNotFound(f"No {r_type} records found for the given domain.")
+
+        
+        
 
 def dns_to_ip(domain_name: str) -> str:
     """
-    Resolves a domain name to its corresponding IP address using the DNS resolution logic.
+    Resolves a domain name to its corresponding IP address or other record types using the DNS resolution logic.
     """
     result = collect_results(domain_name)
-    
-    # Assuming you want to extract the IPv4 address (A record) if available
-    a_records = result.get("A", [])
-    if a_records:
-        return a_records[0]["address"]
-    
-    # If there are no A records, you can handle the case accordingly
-    return "No A records found for the given domain."
-     
-# ... (remaining code)
+    # Iterate through each record type
+    for r_type in ["CNAME", "A", "AAAA", "MX", "SOA", "NS"]:
+        records = result.get(r_type, [])
+        # If records are found for the specified type
+        if records:
+            # For A and AAAA records, return the first IP address found
+            if r_type in ["A", "AAAA"]:
+                return dns_to_ip_extractor(result, r_type)
+            # For SOA records, return the formatted SOA record information
+            elif r_type == "SOA":
+                soa_record = dns_to_ip_extractor(result, r_type)
+                return f"MName: {soa_record['mname']} Serial: {soa_record['serial']} Refresh: {soa_record['refresh']} Retry: {soa_record['retry']} Expire: {soa_record['expire']} Minimum TTL: {soa_record['minimum']}"
+            # For MX records, return the formatted MX record information
+            elif r_type == "MX":
+                mx_record = dns_to_ip_extractor(result, r_type)
+                return f"Name: {mx_record['name']} Preference: {mx_record['preference']} Exchange: {mx_record['exchange']}"
+            # For CNAME records, return the formatted CNAME record information
+            elif r_type == "CNAME":
+                cname_record = dns_to_ip_extractor(result, r_type)
+                buff = f"Name: {cname_record['name']} Address: {cname_record['address']}\n"
+                a_record = dns_to_ip(cname_record['address'])
+                if (a_record):
+                    buff += a_record
+                
+                return buff
+            # For other record types like NS, etc., return the relevant information
+            else:
+                record = records[0]
+                return str(record).replace("{", " ").replace("}", " ").replace("'", "")
+
+    # If no records found for any type
+    return "could not resolve"

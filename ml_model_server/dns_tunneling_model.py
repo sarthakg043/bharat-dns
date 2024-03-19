@@ -62,6 +62,7 @@ def isDNSTunneling(custom_dns):
         result = 0
     else:
         probability = y_custom[0,0]*100
+        result = 1
 
     return result
 

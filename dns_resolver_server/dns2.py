@@ -10,6 +10,7 @@ from sg_ip import dns_to_ip
 import tldextract
 import pandas as pd
 from datetime import datetime
+
 # importing blacklist data domains
 bl_df= pd.read_csv("blacklist.csv",usecols=['domain'])
 wl_df= pd.read_csv("whitelist.csv",usecols=['domain'])
@@ -34,9 +35,54 @@ def get_ip_address(query_name):
         print(f"DNS resolution failed: {e}")
         return None
 
+def get_dns_record(query_name, query_type):
+    try:
+        resolver = dns.resolver.Resolver()
+        answers = resolver.query(query_name, query_type)
+        return [str(rdata) for rdata in answers]
+    except DNSException as e:
+        print(f"DNS resolution failed: {e}")
+        return []
+
+
+def handle_dns_record_type(query_name, query_type, received_domain):
+    response = dns.message.make_response()
+    response.question = dns.message.make_query(query_name, query_type)
+
+    if query_type == dns.rdatatype.A:
+        ip_addresses = get_dns_record(received_domain, 'A')
+        for ip_address in ip_addresses:
+            RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, ip_address)
+            response.answer.append(RRset)
+    elif query_type == dns.rdatatype.CNAME:
+        cname_records = get_dns_record(received_domain, 'CNAME')
+        for cname_record in cname_records:
+            RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, cname_record)
+            response.answer.append(RRset)
+    elif query_type == dns.rdatatype.MX:
+        mx_records = get_dns_record(received_domain, 'MX')
+        for mx_record in mx_records:
+            RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, mx_record)
+            response.answer.append(RRset)
+    elif query_type == dns.rdatatype.AAAA:
+        aaaa_records = get_dns_record(received_domain, 'AAAA')
+        for aaaa_record in aaaa_records:
+            RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, aaaa_record)
+            response.answer.append(RRset)
+    elif query_type == dns.rdatatype.SOA:  # Handling SOA record type
+        soa_records = get_dns_record(received_domain, 'SOA')
+        for soa_record in soa_records:
+            RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, soa_record)
+            response.answer.append(RRset)
+    # Add more record types as needed
+    
+    return response
+
 def handle_dns_request(request, client_address):
     query_name = str(request.question[0].name)
     query_type = request.question[0].rdtype
+    
+    print("Query Type", query_type, type(query_type))
     received_domain = extract_domain(query_name)
     received_domain =  received_domain[:-1] 
     received_domain = extract_domain(query_name)    
@@ -118,9 +164,14 @@ def handle_dns_request(request, client_address):
         else:
             response = dns.message.make_response(request)
             response.question = request.question
-
-            if query_type == A:
-                
+            
+            if query_type == dns.rdatatype.CNAME:
+                cname_records = get_dns_record(received_domain, 'CNAME')
+                for cname_record in cname_records:
+                    RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, cname_record)
+                    response.answer.append(RRset)
+            
+            elif query_type == A:  
                 ip_address = get_ip_address(received_domain)
                 if ip_address:
                     try:
@@ -128,7 +179,19 @@ def handle_dns_request(request, client_address):
                     except:
                         RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, "0.0.0.0")
                     response.answer.append(RRset)
-
+                    
+            elif query_type == dns.rdatatype.AAAA:
+                aaaa_records = get_dns_record(received_domain, 'AAAA')
+                for aaaa_record in aaaa_records:
+                    RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, aaaa_record)
+                    response.answer.append(RRset)
+            
+            elif query_type == dns.rdatatype.MX:
+                mx_records = get_dns_record(received_domain, 'MX')
+                for mx_record in mx_records:
+                    RRset = dns.rrset.from_text(query_name, 300, dns.rdataclass.IN, query_type, mx_record)
+                    response.answer.append(RRset)
+            
     # Set the query ID of the response message
     response.id = request.id
     print(f"Request of {query_name} sent back to {client_address} at time {datetime.now()}")
